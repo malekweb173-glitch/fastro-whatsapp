@@ -1,10 +1,9 @@
-FROM node:18-bullseye-slim
+FROM node:20-alpine
 
 WORKDIR /app
 
-# تثبيت git ضروري لتثبيت مكتبات Baileys
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
-    && rm -rf /var/lib/apt/lists/*
+# تثبيت git عبر Alpine السريع والمستقر جداً
+RUN apk add --no-cache git
 
 COPY package*.json ./
 RUN npm install --omit=dev
