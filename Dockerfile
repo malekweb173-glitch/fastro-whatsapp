@@ -2,16 +2,14 @@ FROM node:18-bullseye-slim
 
 WORKDIR /app
 
-# Install basic dependencies if needed
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+# تثبيت git ضروري لتثبيت مكتبات Baileys
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY . .
-
-# Persistent sessions directory volume
-VOLUME [ "/app/sessions" ]
 
 EXPOSE 3000
 
