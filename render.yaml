@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: fastro-whatsapp-engine
+    name: meta-whatsapp-engine
     runtime: node
     plan: free
     buildCommand: npm install
@@ -9,4 +9,6 @@ services:
       - key: NODE_ENV
         value: production
       - key: WHATSAPP_ENGINE_SECRET
-        generateValue: true
+        value: fastro_whatsapp_secret_key_2026
+      - key: ERP_URL
+        value: https://metainfinity.online

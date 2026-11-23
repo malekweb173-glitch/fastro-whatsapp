@@ -2,13 +2,16 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# تثبيت git عبر Alpine السريع والمستقر جداً
+# Install git via apk (Alpine is fast, lightweight, and never has debian-security 404 issues)
 RUN apk add --no-cache git
 
 COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY . .
+
+# Persistent sessions directory volume
+VOLUME [ "/app/sessions" ]
 
 EXPOSE 3000
 

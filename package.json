@@ -1,7 +1,7 @@
 {
-  "name": "fastro-whatsapp-engine",
+  "name": "meta-infinity-whatsapp-engine",
   "version": "1.0.0",
-  "description": "Self-hosted Multi-Tenant WhatsApp Gateway for Logistics & SaaS",
+  "description": "Native WhatsApp Cloud Engine for Meta Infinity ERP",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
