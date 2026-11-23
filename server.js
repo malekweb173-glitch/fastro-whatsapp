@@ -201,6 +201,30 @@ function authMiddleware(req, res, next) {
 const globalMessageStore = new Map();
 const MESSAGE_STORE_PATH = path.join(SESSIONS_DIR, 'persistent_message_store.json');
 
+// NodeCache for Baileys msgRetryCounterCache
+let NodeCache;
+try {
+    NodeCache = require('node-cache');
+} catch (e) {
+    NodeCache = null;
+}
+
+const msgRetryCounterMap = new Map();
+const msgRetryCounterCache = NodeCache 
+    ? new NodeCache({ stdTTL: 7200, checkperiod: 600, useClones: false }) 
+    : {
+        get: (key) => msgRetryCounterMap.get(key),
+        set: (key, value) => {
+            msgRetryCounterMap.set(key, value);
+            if (msgRetryCounterMap.size > 3000) {
+                const first = msgRetryCounterMap.keys().next().value;
+                msgRetryCounterMap.delete(first);
+            }
+        },
+        del: (key) => msgRetryCounterMap.delete(key),
+        flushAll: () => msgRetryCounterMap.clear()
+    };
+
 // Load stored messages from disk on boot to survive server restarts & re-deploys
 try {
     if (fs.existsSync(MESSAGE_STORE_PATH)) {
@@ -226,21 +250,7 @@ function persistMessageStoreToDisk() {
     }, 1500);
 }
 
-const msgRetryCounterMap = new Map();
-const msgRetryCounterCache = {
-    get: (key) => msgRetryCounterMap.get(key),
-    set: (key, value) => {
-        msgRetryCounterMap.set(key, value);
-        if (msgRetryCounterMap.size > 2000) {
-            const first = msgRetryCounterMap.keys().next().value;
-            msgRetryCounterMap.delete(first);
-        }
-    },
-    del: (key) => msgRetryCounterMap.delete(key),
-    flushAll: () => msgRetryCounterMap.clear()
-};
-
-function saveMessageToStore(id, message, text = '') {
+function saveMessageToStore(id, message, text = '', sessionId = 'default') {
     if (!id) return;
     const msgObj = message || (text ? { conversation: String(text) } : null);
     if (!msgObj) return;
@@ -251,6 +261,38 @@ function saveMessageToStore(id, message, text = '') {
         globalMessageStore.delete(first);
     }
     persistMessageStoreToDisk();
+
+    // Also persist inside the session directory so ERP cloud backup saves it
+    try {
+        const safeId = sanitizeId(sessionId);
+        const sDir = path.join(SESSIONS_DIR, safeId);
+        if (fs.existsSync(sDir)) {
+            const sPath = path.join(sDir, 'persistent_message_store.json');
+            const arr = Array.from(globalMessageStore.entries()).slice(-500);
+            fs.writeFileSync(sPath, JSON.stringify(arr), 'utf8');
+        }
+    } catch (e) {}
+}
+
+// Clean stale pre-keys to prevent Signal Ratchet decryption desynchronization
+function cleanStalePreKeys(sessionPath) {
+    try {
+        if (!fs.existsSync(sessionPath)) return;
+        const files = fs.readdirSync(sessionPath);
+        const preKeyFiles = files.filter(f => f.startsWith('pre-key-') && f.endsWith('.json'));
+        if (preKeyFiles.length > 120) {
+            const sorted = preKeyFiles.sort((a, b) => {
+                const numA = parseInt(a.replace('pre-key-', '').replace('.json', ''), 10) || 0;
+                const numB = parseInt(b.replace('pre-key-', '').replace('.json', ''), 10) || 0;
+                return numB - numA;
+            });
+            const toDelete = sorted.slice(60);
+            for (const f of toDelete) {
+                try { fs.unlinkSync(path.join(sessionPath, f)); } catch (e) {}
+            }
+            console.log(`🧹 Cleaned ${toDelete.length} obsolete pre-keys in session to maintain E2EE key sync`);
+        }
+    } catch (e) {}
 }
 
 // ============================================================================
@@ -306,12 +348,15 @@ async function initSession(sessionId) {
         }
     } catch (e) {}
 
+    // Clean stale pre-keys before initializing socket to keep E2EE ratchets aligned
+    cleanStalePreKeys(sessionPath);
+
     let version;
     try {
         const v = await fetchLatestBaileysVersion();
         version = v.version;
     } catch (e) {
-        version = [2, 3000, 1015901307];
+        version = [2, 3000, 1024622081];
     }
 
     const logger = pino({ level: 'silent' });
@@ -334,7 +379,7 @@ async function initSession(sessionId) {
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 25000, // Safe WebSocket ping interval
         emitOwnEvents: false,
-        retryRequestDelayMs: 600,
+        retryRequestDelayMs: 400,
         generateHighQualityLinkPreview: false,
         msgRetryCounterCache,
         getMessage: async (key) => {
@@ -346,7 +391,27 @@ async function initSession(sessionId) {
                 }
                 return stored;
             }
-            return undefined;
+
+            // Fallback 1: check persistent disk store inside session
+            try {
+                const sMsgPath = path.join(sessionPath, 'persistent_message_store.json');
+                if (fs.existsSync(sMsgPath)) {
+                    const disk = JSON.parse(fs.readFileSync(sMsgPath, 'utf8'));
+                    if (Array.isArray(disk)) {
+                        for (const [k, v] of disk) {
+                            if (String(k) === String(id)) {
+                                return v.text && !v.conversation ? { conversation: String(v.text) } : v;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {}
+
+            // Fallback 2: Return a valid message frame rather than undefined
+            // so Signal Ratchet doesn't crash into permanent "Waiting for this message" freeze
+            return {
+                conversation: ''
+            };
         }
     });
 
