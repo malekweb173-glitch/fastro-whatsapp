@@ -284,6 +284,28 @@ async function initSession(sessionId) {
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
 
+    // Load any existing WhatsApp LID mappings from disk storage
+    const diskLidMap = {};
+    try {
+        if (fs.existsSync(sessionPath)) {
+            const fnames = fs.readdirSync(sessionPath);
+            for (const fn of fnames) {
+                if (fn.startsWith('lid-mapping-') && fn.endsWith('.json')) {
+                    try {
+                        const content = JSON.parse(fs.readFileSync(path.join(sessionPath, fn), 'utf8'));
+                        const lid = fn.replace('lid-mapping-', '').replace('.json', '');
+                        const pn = typeof content === 'string' ? content : (content?.pn || content?.phone || content?.id);
+                        if (lid && pn) {
+                            const cleanP = String(pn).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+                            diskLidMap[lid] = cleanP;
+                            diskLidMap[`${lid}@lid`] = cleanP;
+                        }
+                    } catch (e) {}
+                }
+            }
+        }
+    } catch (e) {}
+
     let version;
     try {
         const v = await fetchLatestBaileysVersion();
@@ -348,11 +370,32 @@ async function initSession(sessionId) {
         sessionData.sock = sock;
         sessionData.lastUpdated = Date.now();
     }
+    sessionData.lidMap = { ...diskLidMap, ...(sessionData.lidMap || {}) };
 
     // Save creds locally AND schedule automatic cloud backup to ERP MySQL
     sock.ev.on('creds.update', async () => {
         await saveCreds();
         scheduleCloudBackup(safeId, 2500);
+    });
+
+    // Auto-map WhatsApp Linked IDs (LIDs) to real phone numbers from incoming contact sync
+    sock.ev.on('contacts.upsert', (contacts) => {
+        if (!Array.isArray(contacts)) return;
+        for (const c of contacts) {
+            const phoneJid = c.id && c.id.includes('@s.whatsapp.net') ? c.id : null;
+            const lidJid = c.lid || (c.id && c.id.includes('@lid') ? c.id : null);
+            if (phoneJid && lidJid) {
+                const phone = phoneJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+                const lid = lidJid.split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+                if (phone && lid) {
+                    if (!sessionData.lidMap) sessionData.lidMap = {};
+                    sessionData.lidMap[lid] = phone;
+                    sessionData.lidMap[lidJid] = phone;
+                    if (!sessionData.phoneToLidMap) sessionData.phoneToLidMap = {};
+                    sessionData.phoneToLidMap[phone] = lidJid;
+                }
+            }
+        }
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -841,15 +884,25 @@ app.post('/send-message', async (req, res) => {
             cleanPhone = '2' + cleanPhone;
         }
 
-        let targetJid = `${cleanPhone}@s.whatsapp.net`;
+        const isLid = (cleanPhone.length >= 13 && (cleanPhone.startsWith('6433') || cleanPhone.startsWith('15') || cleanPhone.startsWith('88') || cleanPhone.startsWith('99'))) || String(to).includes('@lid');
+        let targetJid;
 
-        // 1. Validate & sync recipient prekey bundle with WhatsApp server (Eliminates "Waiting for this message")
-        try {
-            const onWa = await session.sock.onWhatsApp(cleanPhone);
-            if (Array.isArray(onWa) && onWa[0]?.jid) {
-                targetJid = onWa[0].jid;
-            }
-        } catch (e) {}
+        if (isLid) {
+            targetJid = `${cleanPhone}@lid`;
+            console.log(`[${safeId}] 🎯 Delivering message directly to WhatsApp LID: ${targetJid}`);
+        } else {
+            targetJid = `${cleanPhone}@s.whatsapp.net`;
+            // Validate & sync recipient prekey bundle with WhatsApp server (Eliminates "Waiting for this message")
+            try {
+                const onWa = await session.sock.onWhatsApp(cleanPhone);
+                if (Array.isArray(onWa) && onWa[0]?.jid) {
+                    targetJid = onWa[0].jid;
+                    if (!sessionData.lidMap) sessionData.lidMap = {};
+                    if (onWa[0].lid) sessionData.lidMap[onWa[0].lid] = cleanPhone;
+                    sessionData.lidMap[targetJid] = cleanPhone;
+                }
+            } catch (e) {}
+        }
 
         // 2. Establish presence and wake up Signal E2EE ratchet
         try {
@@ -916,15 +969,24 @@ app.post('/send-media', async (req, res) => {
             cleanPhone = '2' + cleanPhone;
         }
 
-        let targetJid = `${cleanPhone}@s.whatsapp.net`;
+        const isLid = (cleanPhone.length >= 13 && (cleanPhone.startsWith('6433') || cleanPhone.startsWith('15') || cleanPhone.startsWith('88') || cleanPhone.startsWith('99'))) || String(to).includes('@lid');
+        let targetJid;
 
-        // 1. Validate & sync recipient prekey bundle with WhatsApp server
-        try {
-            const onWa = await session.sock.onWhatsApp(cleanPhone);
-            if (Array.isArray(onWa) && onWa[0]?.jid) {
-                targetJid = onWa[0].jid;
-            }
-        } catch (e) {}
+        if (isLid) {
+            targetJid = `${cleanPhone}@lid`;
+            console.log(`[${safeId}] 🎯 Delivering media document directly to WhatsApp LID: ${targetJid}`);
+        } else {
+            targetJid = `${cleanPhone}@s.whatsapp.net`;
+            try {
+                const onWa = await session.sock.onWhatsApp(cleanPhone);
+                if (Array.isArray(onWa) && onWa[0]?.jid) {
+                    targetJid = onWa[0].jid;
+                    if (!sessionData.lidMap) sessionData.lidMap = {};
+                    if (onWa[0].lid) sessionData.lidMap[onWa[0].lid] = cleanPhone;
+                    sessionData.lidMap[targetJid] = cleanPhone;
+                }
+            } catch (e) {}
+        }
 
         // 2. Establish presence and wake up Signal E2EE ratchet
         try {
